@@ -1,0 +1,15 @@
+mido
+pretty_midi
+numpy
+scipy
+fastdtw
+selenium
+webdriver-manager
+tensorflow 
+keras
+scikit-learn
+numpy
+pandas
+pretty_midi
+fastapi
+uvicorn
