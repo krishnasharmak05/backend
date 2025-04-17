@@ -11,5 +11,6 @@ scikit-learn
 numpy
 pandas
 pretty_midi
-fastapi
-uvicorn
+fastapi[all]
+uvicorn[standard]
+starlette

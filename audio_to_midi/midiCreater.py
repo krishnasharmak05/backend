@@ -16,11 +16,33 @@ from difflib import SequenceMatcher
 from scipy.fft import fft
 from scipy.stats import entropy
 
-from fastapi import FastAPI
+from fastapi import FastAPI, File, Form, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
 
+origins = [
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 MIDI_FOLDER = os.path.abspath("./output")
+
+@app.post("/upload")
+async def upload_file(file: UploadFile = File(...), filename: str = Form(...)):
+    os.makedirs("inputs", exist_ok=True)
+    file_path = os.path.join("inputs", filename)
+    with open(file_path, "wb") as f:
+        f.write(await file.read())  
+    return {"filename": file_path}
 
 def create_midi(mp3_file):
     os.makedirs(MIDI_FOLDER, exist_ok=True)
@@ -40,14 +62,16 @@ def create_midi(mp3_file):
 
         file_path = os.path.abspath(f"./inputs/{mp3_file}.mp3")
         file_input.send_keys(file_path)
-        
+
         download_button = WebDriverWait(driver, 300).until(
-            EC.element_to_be_clickable((By.XPATH, "//button[contains(., 'Download MIDI')]"))
+            EC.element_to_be_clickable(
+                (By.XPATH, "//button[contains(., 'Download MIDI')]")
+            )
         )
         driver.execute_script("arguments[0].click();", download_button)
         print("Download button clicked!")
 
-        time.sleep(5) 
+        time.sleep(5)
         midi_file = None
         for _ in range(30):
             files = [f for f in os.listdir(MIDI_FOLDER) if f.endswith(".mid")]
@@ -67,23 +91,27 @@ def create_midi(mp3_file):
         time.sleep(5)
 
     finally:
-        driver.quit() 
+        driver.quit()
 
 
 def extract_midi_features(midi_file):
     midi_data = pretty_midi.PrettyMIDI(midi_file)
     pitches, note_durations, intervals_between_notes = [], [], []
-    
+
     for instrument in midi_data.instruments:
         if not instrument.is_drum:
             prev_start = 0
             for note in instrument.notes:
                 pitches.append(note.pitch)
-                note_durations.append(note.end - note.start)  
+                note_durations.append(note.end - note.start)
                 intervals_between_notes.append(note.start - prev_start)
                 prev_start = note.start
 
-    return np.array(pitches), np.array(note_durations), np.array(intervals_between_notes)
+    return (
+        np.array(pitches),
+        np.array(note_durations),
+        np.array(intervals_between_notes),
+    )
 
 
 def cosine_similarity(seq1, seq2):
@@ -91,32 +119,37 @@ def cosine_similarity(seq1, seq2):
     seq1, seq2 = seq1[:min_len], seq2[:min_len]
     return 1 - cosine(seq1, seq2) if len(seq1) > 0 and len(seq2) > 0 else 0
 
+
 # melody comparison
 def dynamic_time_warping_similarity(seq1, seq2):
     distance, _ = fastdtw(seq1.reshape(-1, 1), seq2.reshape(-1, 1), dist=euclidean)
     return 1 / (1 + distance)
 
+
 # Compare note duration sequences
 def rhythm_similarity(seq1, seq2):
     return cosine_similarity(seq1, seq2)
+
 
 # Compare chord distributions
 def harmonic_similarity(seq1, seq2):
     hist1, hist2 = Counter(seq1), Counter(seq2)
     all_chords = set(hist1.keys()).union(set(hist2.keys()))
-    
+
     vec1 = np.array([hist1[n] for n in all_chords])
     vec2 = np.array([hist2[n] for n in all_chords])
-    
+
     return 1 - cosine(vec1, vec2) if len(vec1) > 0 and len(vec2) > 0 else 0
+
 
 # Compare sequences of 3 consecutive notes
 def ngrams_fingerprinting(seq1, seq2, n=3):
-    grams1 = set(tuple(seq1[i:i+n]) for i in range(len(seq1)-n+1))
-    grams2 = set(tuple(seq2[i:i+n]) for i in range(len(seq2)-n+1))
+    grams1 = set(tuple(seq1[i : i + n]) for i in range(len(seq1) - n + 1))
+    grams2 = set(tuple(seq2[i : i + n]) for i in range(len(seq2) - n + 1))
     intersection = len(grams1.intersection(grams2))
     union = len(grams1.union(grams2))
     return intersection / union if union != 0 else 0
+
 
 # Fourier Transform Similarity - Compare frequency components
 def fourier_similarity(seq1, seq2):
@@ -124,18 +157,24 @@ def fourier_similarity(seq1, seq2):
     min_len = min(len(fft1), len(fft2))
     return cosine_similarity(np.abs(fft1[:min_len]), np.abs(fft2[:min_len]))
 
+
 # Measures musical complexity
 def entropy_similarity(seq1, seq2):
     return 1 - abs(entropy(np.bincount(seq1)) - entropy(np.bincount(seq2)))
 
+
 # Function to compare one MIDI file against a list
 def compare_midi_files(main_midi, midi_list):
-    main_pitches, main_durations, main_intervals = extract_midi_features(os.path.abspath(os.path.join("output", main_midi)))
+    main_pitches, main_durations, main_intervals = extract_midi_features(
+        os.path.abspath(os.path.join("output", main_midi))
+    )
     similarities = {}
 
     for midi_file in midi_list:
-        other_pitches, other_durations, other_intervals = extract_midi_features(midi_file)
-        
+        other_pitches, other_durations, other_intervals = extract_midi_features(
+            midi_file
+        )
+
         cosine_sim = cosine_similarity(main_pitches, other_pitches)
         dtw_sim = dynamic_time_warping_similarity(main_pitches, other_pitches)
         rhythm_sim = rhythm_similarity(main_durations, other_durations)
@@ -153,15 +192,8 @@ def compare_midi_files(main_midi, midi_list):
             "Fourier Similarity": round(fourier_sim, 3),
             "Entropy Similarity": round(entropy_sim, 3),
         }
-    
+
     return similarities
-
-
-
-
-
-
-
 
 
 # ADDING a nn
@@ -178,7 +210,7 @@ def compare_midi_files(main_midi, midi_list):
 # # Extract features from a MIDI file
 # def extract_midi_features(midi_file):
 #     midi_data = pretty_midi.PrettyMIDI(midi_file)
-    
+
 #     pitches, durations, intervals = [], [], []
 #     for instrument in midi_data.instruments:
 #         if not instrument.is_drum:
@@ -198,7 +230,7 @@ def compare_midi_files(main_midi, midi_list):
 #         pitches = scaler.fit_transform(pitches.reshape(-1, 1)).flatten()
 #         durations = scaler.fit_transform(durations.reshape(-1, 1)).flatten()
 #         intervals = scaler.fit_transform(intervals.reshape(-1, 1)).flatten()
-    
+
 #     # Compute Fourier Transform of the pitch sequence
 #     if len(pitches) > 0:
 #         fft_features = np.abs(fft(pitches))
@@ -208,7 +240,7 @@ def compare_midi_files(main_midi, midi_list):
 
 #     # Combine features
 #     feature_vector = np.concatenate([pitches[:50], durations[:50], intervals[:50], fft_features[:10]])  # Truncate or pad
-    
+
 #     return feature_vector
 
 
@@ -247,7 +279,6 @@ def compare_midi_files(main_midi, midi_list):
 # dataset = create_dataset("output/")
 # print(midi_folder)
 # X1_train, X2_train, Y_train = prepare_training_data(dataset)
-
 
 
 # Step 4: Build the nn
@@ -304,27 +335,86 @@ def compare_midi_files(main_midi, midi_list):
 # print(f"Predicted Similarity Score: {similarity}")
 
 
+# @app.get("/process_midi")
+# async def main():
+#     main_midi_file = None
+#     midi_folder = "output/"
 
+#     for file in os.listdir("inputs"):
+#         if file.split(".")[0] + ".mid" not in os.listdir("output"):
+#             main_midi_file = file.split(".")[0] + ".mid"
+#             create_midi(file.split(".")[0])
+#             midi_files = [
+#                 os.path.join(midi_folder, f)
+#                 for f in os.listdir(midi_folder)
+#                 if f.endswith(".mid")
+#             ]
 
-@app.get("/process_midi")
-async def main():
+#             results = compare_midi_files(main_midi_file, midi_files)
+
+#             sorted_results = sorted(
+#                 results.items(), key=lambda x: x[1]["DTW Similarity"], reverse=True
+#             )
+#             for midi, scores in sorted_results:
+#                 print(f"{midi}: {scores}")
+#             result_dict = {midi: scores for midi, scores in sorted_results}
+#             return result_dict
+#     return {"message": "No new MIDI files to process."}
+
+import numpy as np
+
+@app.post("/process_midi")
+async def process_midi(file_info: dict):
     main_midi_file = None
     midi_folder = "output/"
+
+    filename = file_info.get("filename")  # Assuming you're passing the filename
     
-    for file in os.listdir("inputs"):
-        if file.split(".")[0]+".mid" not in os.listdir("output"):
-            main_midi_file = file.split(".")[0]+".mid"
-            create_midi(file.split(".")[0])
-            midi_files = [os.path.join(midi_folder, f) for f in os.listdir(midi_folder) if f.endswith(".mid")]
+    # Check if the corresponding .mid file exists or needs to be created
+    if filename:
+        for file in os.listdir("inputs"):
+            if file.split(".")[0] + ".mid" not in os.listdir("output"):
+                main_midi_file = file.split(".")[0] + ".mid"
+                create_midi(file.split(".")[0])
+                midi_files = [
+                    os.path.join(midi_folder, f)
+                    for f in os.listdir(midi_folder)
+                    if f.endswith(".mid")
+                ]
 
-            results = compare_midi_files(main_midi_file, midi_files)
+                # Compare MIDI files and calculate similarity scores
+                results = compare_midi_files(main_midi_file, midi_files)
 
-            sorted_results = sorted(results.items(), key=lambda x: x[1]["DTW Similarity"], reverse=True)
-            for midi, scores in sorted_results:
-                print(f"{midi}: {scores}")
-            result_dict = {midi: scores for midi, scores in sorted_results}
-            return result_dict
-    return {"message": "No new MIDI files to process."}
+                # Sort results based on 'DTW Similarity' or any other metric you want
+                sorted_results = sorted(
+                    results.items(), key=lambda x: x[1]["DTW Similarity"], reverse=True
+                )
+
+                # Find the maximum similarity that's not equal to 1.0
+                max_similarity = -1  # Start with a value smaller than possible similarities
+                max_similarity_file = None
+
+                for midi, scores in sorted_results:
+                    # Iterate through all the similarity scores
+                    for similarity_key, similarity_value in scores.items():
+                        # Convert np.float64 to regular float for comparison
+                        if isinstance(similarity_value, np.float64):
+                            similarity_value = float(similarity_value)
+                        
+                        # We only care about max similarity that is not 1.0
+                        if similarity_value != 1.0 and similarity_value > max_similarity:
+                            max_similarity = similarity_value
+                            max_similarity_file = midi
+
+                if max_similarity_file:
+                    return {
+                        "file": max_similarity_file,
+                        "max_similarity": max_similarity
+                    }
+
+        return {"message": "No new MIDI files to process."}
+    else:
+        return {"error": "No filename provided for processing"}
 
 
 if __name__ == "__main__":
